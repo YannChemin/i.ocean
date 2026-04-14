@@ -7,6 +7,22 @@
 # PURPOSE:      Render ocean areas of a raster map with a realistic
 #               appearance, using depth, CRS scale, and latitude to drive
 #               colour palettes, depth gradients, and wave textures.
+#
+#               Key behaviours
+#               ──────────────
+#               • Depth index — input bathymetry is normalised to 0–1000
+#                 (shore→abyss); falls back to shore-distance or flat 500.
+#               • Integer (CELL) depth smoothing — when the depth map is
+#                 integer type, a 3×3 neighbourhood average (r.neighbors
+#                 method=average) converts it to DCELL before normalisation,
+#                 eliminating staircase artefacts from the rendered gradient.
+#               • Multi-core parallelism — all r.mapcalc and r.neighbors
+#                 calls use nprocs=os.cpu_count() so all available cores
+#                 are utilised automatically.
+#               • Progress reporting — gs.percent() is called at each
+#                 processing step so both the terminal and the GRASS GUI
+#                 progress bar show percentage advancement.
+#
 # COPYRIGHT:    (C) 2026 by the GRASS Development Team
 #               This program is free software under the GNU General Public
 #               License (>=v2). Read the file COPYING that comes with GRASS
@@ -16,11 +32,13 @@
 
 # %module
 # % description: Renders ocean areas of a raster map with a realistic visual appearance
+# % keyword: imagery
 # % keyword: raster
 # % keyword: ocean
 # % keyword: visualization
 # % keyword: color
 # % keyword: depth
+# % keyword: bathymetry
 # %end
 
 # %option G_OPT_R_INPUT
@@ -113,6 +131,9 @@ import os
 import sys
 
 import grass.script as gs
+
+# ── parallelism ──────────────────────────────────────────────────────────────
+_NPROCS = os.cpu_count() or 1
 
 # ── temporary map registry ──────────────────────────────────────────────────
 _TMP = []
@@ -306,7 +327,7 @@ def _ocean_mask_from_input(input_map, value, pid):
     name = _register(f"tmp_iocean_mask_{pid}")
     gs.mapcalc(
         f"{name} = if({input_map} == {value}, 1, null())",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     return name
 
@@ -323,9 +344,46 @@ def _ocean_mask_from_depth(depth_map, depth_min, pid):
     name = _register(f"tmp_iocean_mask_{pid}")
     gs.mapcalc(
         f"{name} = if({depth_map} >= {depth_min}, 1, null())",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     return name
+
+
+def _smooth_integer_depth(depth_map, pid):
+    """Smooth a CELL (integer) depth raster to remove staircase gradient artefacts.
+
+    When bathymetric data are stored as integer (CELL type), successive depth
+    contours become discrete staircase steps in the rendered gradient.  A 3×3
+    neighbourhood average converts the raster to DCELL and creates sub-pixel
+    linear transitions between depth levels, approximating continuous linear
+    interpolation across the integer step boundaries.
+
+    Implementation note — why r.neighbors average works here
+    ─────────────────────────────────────────────────────────
+    r.neighbors/main.c (line 64) registers the *average* method with output
+    type T_FLOAT.  The output_type() helper (lines 117–135) maps T_FLOAT
+    unconditionally to DCELL_TYPE regardless of the input map type (the
+    T_COPY branch at line 127–128 is the only path that preserves the input
+    type).  Consequently a 3×3 average of a CELL raster always yields a
+    DCELL raster where each cell holds a weighted mean of its integer
+    neighbours — effectively bilinear interpolation across integer step
+    boundaries at the native resolution.
+
+    r.neighbors accepts nprocs= (main.c line 279, G_OPT_M_NPROCS) so the
+    same thread count used throughout i.ocean is applied here.
+    """
+    smoothed = _register(f"tmp_iocean_depth_smooth_{pid}")
+    gs.run_command(
+        "r.neighbors",
+        input=depth_map,
+        output=smoothed,
+        method="average",
+        size=3,
+        nprocs=_NPROCS,
+        overwrite=True,
+        quiet=True,
+    )
+    return smoothed
 
 
 def _depth_from_map(depth_map, mask, pid):
@@ -335,11 +393,23 @@ def _depth_from_map(depth_map, mask, pid):
     linearly rescaled so that the deepest cell in the ocean mask maps to 1000
     and the shallowest maps to 0. If the maximum depth is zero or missing
     a flat index of 500 is used and a warning is issued.
+
+    When the input depth map is integer (CELL type), _smooth_integer_depth()
+    is applied first so that the normalised depth index is a smooth DCELL
+    gradient rather than a staircase of discrete integer levels.
     """
+    info = gs.parse_command("r.info", map=depth_map, flags="g")
+    if info.get("datatype") == "CELL":
+        gs.verbose(_(
+            "Depth map is integer (CELL) — smoothing with r.neighbors "
+            "to remove staircase gradient artefacts…"
+        ))
+        depth_map = _smooth_integer_depth(depth_map, pid)
+
     raw = _register(f"tmp_iocean_depth_raw_{pid}")
     gs.mapcalc(
         f"{raw} = if(isnull({mask}), null(), abs({depth_map}))",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     stats = gs.parse_command("r.univar", map=raw, flags="g", quiet=True)
     max_d = float(stats.get("max", 0) or 0)
@@ -352,12 +422,12 @@ def _depth_from_map(depth_map, mask, pid):
         gs.mapcalc(
             f"{out} = if(isnull({mask}), null(), "
             f"min(1000.0, 1000.0 * {raw} / {max_d}))",
-            overwrite=True, quiet=True,
+            overwrite=True, quiet=True, nprocs=_NPROCS,
         )
     else:
         gs.mapcalc(
             f"{out} = if(isnull({mask}), null(), 500.0)",
-            overwrite=True, quiet=True,
+            overwrite=True, quiet=True, nprocs=_NPROCS,
         )
     return out
 
@@ -370,11 +440,15 @@ def _depth_from_shore(mask, pid):
     the nearest non-null land cell. The resulting distances are linearly
     rescaled to the 0–1000 depth index range, approximating the continental
     shelf gradient without requiring external bathymetric data.
+
+    Note: *r.grow.distance* does not support multi-threading; the nprocs
+    setting is therefore not forwarded to that call. The r.mapcalc steps
+    before and after it do use *_NPROCS*.
     """
     land = _register(f"tmp_iocean_land_{pid}")
     gs.mapcalc(
         f"{land} = if(isnull({mask}), 1, null())",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     dist = _register(f"tmp_iocean_dist_{pid}")
     gs.run_command(
@@ -388,7 +462,7 @@ def _depth_from_shore(mask, pid):
     gs.mapcalc(
         f"{out} = if(isnull({mask}), null(), "
         f"min(1000.0, 1000.0 * {dist} / {max_dist}))",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     return out
 
@@ -403,7 +477,7 @@ def _flat_depth(mask, pid, value=500.0):
     out = _register(f"tmp_iocean_depth_flat_{pid}")
     gs.mapcalc(
         f"{out} = if(isnull({mask}), null(), {value})",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     return out
 
@@ -423,7 +497,8 @@ def _wave_pattern(mask, pixel_m, pid):
     - > 100 km: large gyre-like undulations (10 px period, amplitude 20)
 
     Returns a tuple (raster_name, amplitude) where raster values range
-    approximately from −amplitude to +amplitude.
+    approximately from −amplitude to +amplitude. The r.mapcalc call uses
+    *_NPROCS* for multi-core parallelism.
     """
     # Choose wave parameters by scale
     if pixel_m < 100:
@@ -461,7 +536,7 @@ def _wave_pattern(mask, pixel_m, pid):
         f"{amp:.1f} * sin({two_pi:.6f} * col() / {period_c}) "
         f"* cos({two_pi:.6f} * row() / {period_r}) "
         f"+ {amp * 0.4:.1f} * sin({two_pi:.6f} * (col() + row()) / {diag_period}))",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     return out, amp
 
@@ -488,7 +563,7 @@ def _latitude_gradient(depth_idx, lat, mask, pid):
         expr = f"{depth_idx} + {shift} * row() / nrows()"
     gs.mapcalc(
         f"{out} = if(isnull({mask}), null(), {expr})",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
     return out
 
@@ -517,8 +592,19 @@ def main():
     if depth_map and not gs.find_file(depth_map, element="raster")["file"]:
         gs.fatal(_(f"Depth raster <{depth_map}> not found."))
 
+    # ── progress tracking ────────────────────────────────────────────────────
+    # Fixed steps: region, mask, depth-index, output-write, colour-rules, metadata
+    _total = 6 + int(flag_latgrd) + int(flag_waves)
+    _step  = 0
+
+    def _progress(msg):
+        nonlocal _step
+        _step += 1
+        gs.percent(_step, _total, 1)
+        gs.message(msg)
+
     # ── region / projection ──────────────────────────────────────────────────
-    gs.message(_("Analysing region and CRS…"))
+    _progress(_("Analysing region and CRS…"))
     region = gs.region()
     proj   = gs.parse_command("g.proj", flags="g")
 
@@ -535,7 +621,7 @@ def main():
     gs.message(_(f"Ocean colour style: {style}  (latitude {latitude:.1f}°)"))
 
     # ── ocean mask ───────────────────────────────────────────────────────────
-    gs.message(_("Extracting ocean pixels…"))
+    _progress(_("Extracting ocean pixels…"))
     if input_map:
         # Explicit mask: a specific cell value marks ocean
         mask = _ocean_mask_from_input(input_map, ocean_val, pid)
@@ -565,44 +651,43 @@ def main():
 
     # ── depth index (0 = shore / surface, 1000 = abyss) ─────────────────────
     if depth_map:
-        gs.message(_("Building depth index from bathymetric map…"))
+        _progress(_("Building depth index from bathymetric map…"))
         depth_idx = _depth_from_map(depth_map, mask, pid)
     elif flag_shore:
-        gs.message(_("Estimating depth from distance to shore…"))
+        _progress(_("Estimating depth from distance to shore…"))
         depth_idx = _depth_from_shore(mask, pid)
     else:
+        _progress(_("Setting flat depth index…"))
         depth_idx = _flat_depth(mask, pid)
 
     # ── latitude warmth gradient ─────────────────────────────────────────────
     if flag_latgrd:
-        gs.message(_("Applying north–south temperature gradient…"))
+        _progress(_("Applying north–south temperature gradient…"))
         depth_idx = _latitude_gradient(depth_idx, latitude, mask, pid)
 
     # ── wave texture ─────────────────────────────────────────────────────────
     wave_amp = 0
     if flag_waves:
-        gs.message(
-            _(f"Generating wave texture (pixel scale {pixel_m:,.0f} m)…")
-        )
+        _progress(_(f"Generating wave texture (pixel scale {pixel_m:,.0f} m)…"))
         wave_rast, wave_amp = _wave_pattern(mask, pixel_m, pid)
         blended = _register(f"tmp_iocean_blended_{pid}")
         gs.mapcalc(
             f"{blended} = if(isnull({mask}), null(), {depth_idx} + {wave_rast})",
-            overwrite=True, quiet=True,
+            overwrite=True, quiet=True, nprocs=_NPROCS,
         )
         final_src = blended
     else:
         final_src = depth_idx
 
     # ── write output ─────────────────────────────────────────────────────────
-    gs.message(_("Writing output raster…"))
+    _progress(_("Writing output raster…"))
     gs.mapcalc(
         f"{output} = if(isnull({mask}), null(), float({final_src}))",
-        overwrite=True, quiet=True,
+        overwrite=True, quiet=True, nprocs=_NPROCS,
     )
 
     # ── colour rules ─────────────────────────────────────────────────────────
-    gs.message(_("Applying ocean colour palette…"))
+    _progress(_("Applying ocean colour palette…"))
     palette = _PALETTES[style]
     rules   = _build_color_rules(palette, wave_amp)
     gs.write_command(
@@ -610,6 +695,7 @@ def main():
     )
 
     # ── metadata ─────────────────────────────────────────────────────────────
+    _progress(_("Writing metadata…"))
     effects = []
     if depth_map:
         effects.append("depth-map")
@@ -634,6 +720,7 @@ def main():
     )
     gs.raster_history(output)
 
+    gs.percent(1, 1, 1)
     gs.message(_(f"Done. Ocean visualisation written to <{output}>."))
     gs.message(_(f"Display with:  d.rast map={output}"))
 

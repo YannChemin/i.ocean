@@ -10,6 +10,10 @@ are set to null in the output so the result composites cleanly over any land
 base map when displayed with
 *[d.rast](https://grass.osgeo.org/grass-stable/manuals/d.rast.html)*.
 
+Processing progress is reported as a percentage through both the terminal
+and the GRASS GUI progress bar. All raster computations use all available
+CPU cores automatically.
+
 The **input** parameter specifies an ocean mask raster. Cells whose value
 equals **ocean_value** (default: 1) are treated as ocean; all other cells
 become null in the output.
@@ -20,7 +24,10 @@ values representing depth in metres below the surface (e.g. GEBCO). When
 lighter, warmer colours and deep areas receive darker, cooler colours. When
 **input** is omitted, **depth** additionally defines the ocean extent by
 thresholding: cells with value greater than or equal to **depth_min**
-(default: 0) are treated as ocean.
+(default: 0) are treated as ocean. When the **depth** map is stored as an
+integer raster (CELL type), it is automatically smoothed with a 3×3
+neighbourhood average before normalisation to remove staircase artefacts
+from the rendered gradient (see *Integer depth smoothing* below).
 
 The **ocean_value** option sets the cell value in the **input** mask that
 identifies ocean pixels. It is ignored when only **depth** is provided.
@@ -90,6 +97,49 @@ available, applied in priority order:
 3. Default — a flat index of 500 is applied, placing all ocean pixels at the
    mid-point of the colour palette.
 
+### Integer depth smoothing
+
+Many widely used bathymetric datasets (ETOPO, GEBCO at coarser resolutions,
+national chart data) are distributed as integer rasters (GRASS CELL type).
+When the depth index is normalised from integer values, the fixed step size
+between adjacent integers produces visible staircase terracing in the
+rendered gradient — each integer depth level maps to an identical colour
+band.
+
+When *i.ocean* detects a CELL-type **depth** map it applies a 3×3
+neighbourhood average with
+*[r.neighbors](https://grass.osgeo.org/grass-stable/manuals/r.neighbors.html)*
+before normalisation. The *average* method in *r.neighbors* always produces
+a DCELL (double-precision floating-point) output regardless of input type
+(see *r.neighbors* source, `main.c` lines 64 and 117–135): each output cell
+is the mean of its 3×3 integer neighbourhood, yielding sub-pixel fractional
+transitions across depth step boundaries. The resulting smooth floating-point
+raster is then normalised to the 0–1000 depth index in the usual way.
+
+FCELL and DCELL depth maps are passed through unchanged; no smoothing is
+applied because the values are already continuous.
+
+### Multi-core parallelism
+
+All *r.mapcalc* and *r.neighbors* calls pass `nprocs=` equal to
+`os.cpu_count()` so every available logical CPU core is used. On a
+multi-core workstation this can reduce wall-clock time substantially for
+large rasters. The value is fixed once at module startup; to limit CPU
+usage, reduce the system-level CPU affinity before running the module.
+
+*r.grow.distance* (used by the **-s** flag) does not support multi-threading
+and runs single-threaded regardless of the nprocs setting.
+
+### Progress reporting
+
+Processing is split into discrete named steps (region analysis, ocean mask
+extraction, depth index computation, optional gradient and wave steps, output
+write, colour rules, metadata). At the start of each step a percentage value
+is emitted via `gs.percent()`, updating both the terminal progress indicator
+and the GRASS GUI progress bar. The total step count is computed at startup
+from the combination of flags supplied, so the percentage always advances
+uniformly to 100 %.
+
 ### Scale-aware wave textures
 
 When the **-w** flag is active the wave period and amplitude are chosen
@@ -144,7 +194,8 @@ d.rast map=ocean_view
 ### Using a bathymetric map as the sole input
 
 When a GEBCO-style depth raster is available it can be passed directly as
-**depth** without a separate mask. Cells with depth ≥ 0 become ocean.
+**depth** without a separate mask. Cells with depth ≥ 0 become ocean. If the
+raster is integer type (CELL), the stepped gradient is smoothed automatically.
 
 ```sh
 i.ocean depth=gebco_bathy output=ocean_view
@@ -208,6 +259,7 @@ d.shade shade=hillshade color=ocean_deep
 ## SEE ALSO
 
 *[r.mapcalc](https://grass.osgeo.org/grass-stable/manuals/r.mapcalc.html)*,
+*[r.neighbors](https://grass.osgeo.org/grass-stable/manuals/r.neighbors.html)*,
 *[r.colors](https://grass.osgeo.org/grass-stable/manuals/r.colors.html)*,
 *[r.grow.distance](https://grass.osgeo.org/grass-stable/manuals/r.grow.distance.html)*,
 *[r.relief](https://grass.osgeo.org/grass-stable/manuals/r.relief.html)*,

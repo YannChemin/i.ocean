@@ -14,14 +14,22 @@ cleanly over any land base-map.
   icy polar blue, auto-detected from the map centre or set explicitly.
 - **Depth-based colour gradient** — accepts a bathymetric raster; falls back to
   shore-distance estimation (`-s`) or a flat mid-depth default.
+- **Automatic integer depth smoothing** — when the depth map is integer type
+  (CELL), a 3×3 neighbourhood average converts it to a continuous floating-point
+  (DCELL) raster before normalisation, removing staircase artefacts from the
+  rendered gradient.
 - **Scale-aware wave textures** (`-w`) — sinusoidal wave patterns whose period
-  and amplitude are calibrated to the current pixel size across six scale tiers
+  and amplitude are calibrated to the current pixel size across five scale tiers
   (sub-100 m ripples → 100 km gyre-scale undulations).
 - **North–south warmth gradient** (`-l`) — mimics the visible SST gradient
   within the scene by subtly shifting colour temperature from equatorward to
   poleward.
 - **Full CRS support** — geographic (degrees) and projected (metres, feet, km)
   coordinate systems; pixel sizes are converted to metres internally.
+- **Multi-core parallel processing** — all `r.mapcalc` and `r.neighbors` calls
+  automatically use all available CPU cores (`os.cpu_count()`).
+- **Progress reporting** — percentage advancement is shown in both the terminal
+  and the GRASS GUI progress bar as the module moves through its processing steps.
 
 ## Colour palettes
 
@@ -43,6 +51,7 @@ r.mapcalc "sea_mask = if(elevation < 0, 1, null())"
 i.ocean input=sea_mask output=ocean_view
 
 # 3. With bathymetry, waves, and shore-depth fallback
+#    Integer (CELL) depth maps are smoothed automatically
 i.ocean input=sea_mask depth=gebco_bathy output=ocean_deep -w
 
 # 4. Shore-estimated depth + latitude warmth gradient
@@ -59,11 +68,12 @@ d.rast map=ocean_view
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `input` | raster | — | Input raster map |
+| `input` | raster | — | Ocean mask raster (cells equal to `ocean_value` are ocean) |
 | `output` | raster | — | Output ocean visualisation raster |
-| `depth` | raster | — | Bathymetric depth map (positive = metres below surface) |
-| `ocean_value` | float | `1` | Cell value that marks ocean pixels |
-| `latitude` | float | auto | Reference latitude (decimal degrees); auto-detected if omitted |
+| `depth` | raster | — | Bathymetric depth map (positive = metres below surface); integer maps are smoothed automatically |
+| `ocean_value` | float | `1` | Cell value that marks ocean pixels in `input` |
+| `depth_min` | float | `0` | Minimum depth value treated as ocean when deriving the mask from `depth`; use a negative value for DEM/elevation maps |
+| `latitude` | float | auto | Reference latitude (decimal degrees, negative = south); auto-detected from map centre if omitted |
 | `style` | string | `auto` | Colour style: `auto`, `tropical`, `subtropical`, `temperate`, `subpolar`, `polar` |
 
 ## Flags
@@ -71,17 +81,16 @@ d.rast map=ocean_view
 | Flag | Description |
 |---|---|
 | `-w` | Add scale-aware wave / ripple texture |
-| `-s` | Estimate depth from distance to shore (requires no depth map) |
+| `-s` | Estimate depth from distance to shore (used when no `depth` map is given) |
 | `-l` | Apply subtle north–south warmth gradient across the scene |
 
 ## Requirements
 
 - GRASS GIS ≥ 8.0
 - Python ≥ 3.8
-- Standard GRASS modules used: `r.mapcalc`, `r.colors`, `r.grow.distance`,
-  `r.univar`, `r.support`, `g.proj`, `m.proj`, `g.remove`
+- Standard GRASS modules used: `r.mapcalc`, `r.neighbors`, `r.colors`,
+  `r.grow.distance`, `r.univar`, `r.support`, `g.proj`, `m.proj`, `g.remove`
 
 ## Installation
 
 See [INSTALL.md](INSTALL.md).
-
