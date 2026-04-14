@@ -85,7 +85,3 @@ d.rast map=ocean_view
 
 See [INSTALL.md](INSTALL.md).
 
-## License
-
-GNU General Public License v2 or later — see the `COPYING` file distributed
-with GRASS GIS.
