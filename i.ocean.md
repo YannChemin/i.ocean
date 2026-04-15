@@ -2,12 +2,14 @@
 
 *i.ocean* renders ocean areas of a raster map with a realistic visual
 appearance. It combines depth-based colour gradients, latitude-driven colour
-temperature, and optional wave textures to produce a styled, floating-point
-output raster with an automatically tuned ocean colour table.
+temperature, optional wave textures, physically-based ocean turbulence with
+coastal foam, and optional maritime decorations to produce a styled,
+floating-point output raster with an automatically tuned ocean colour table.
 
-At least one of **input** or **depth** must be provided. Non-ocean pixels
-are set to null in the output so the result composites cleanly over any land
-base map when displayed with
+The module is written in C with OpenMP parallelism and uses FFTW3 for
+spectral ocean surface synthesis. At least one of **input** or **depth**
+must be provided. Non-ocean pixels are set to null in the output so the
+result composites cleanly over any land base map when displayed with
 *[d.rast](https://grass.osgeo.org/grass-stable/manuals/d.rast.html)*.
 
 Processing progress is reported as a percentage through both the terminal
@@ -65,6 +67,22 @@ scene. Equatorward pixels are shifted towards shallower (lighter) colours
 to mimic the visible sea-surface-temperature (SST) gradient typical of
 scenes that span several degrees of latitude.
 
+The **-f** flag generates a physically-based ocean surface using the
+Phillips power spectrum (Tessendorf 2001) computed by FFTW3. The spectrum
+encodes multi-scale wave energy as a function of wavenumber, wind speed,
+and dominant length scale. A 2-D real inverse FFT produces the spatial
+height field; Gaussian noise is drawn with Box-Muller per-thread for
+thread-safe reproduction. Foam appears where wave crests exceed a
+threshold (a squared-excess kernel inspired by the 0AD water_high.fs foam
+model), and the foam intensity is amplified near the coast using a
+two-pass Euclidean distance transform.
+
+The **-d** flag scatters maritime decorations across the ocean surface.
+Decorations are stamped as small pixel-art patterns that modify the local
+depth-index value. Placement density is proportional to ocean area; a
+fixed-seed PRNG ensures reproducible results. Supported types: whale,
+dolphin, fish school, octopus, treasure chest, floating crate, sunken ship.
+
 ## NOTES
 
 ### Ocean mask sources
@@ -119,16 +137,61 @@ raster is then normalised to the 0–1000 depth index in the usual way.
 FCELL and DCELL depth maps are passed through unchanged; no smoothing is
 applied because the values are already continuous.
 
+### Phillips-spectrum turbulence and foam (-f)
+
+The ocean surface height field is generated in the spectral domain using
+the Phillips power spectrum:
+
+```
+P(k) = A · exp(−1/(k·L)²) / k⁴ · |k̂ · ŵ|²
+```
+
+where *k* is the wavenumber magnitude, *L = V²/g* is the dominant length
+scale derived from wind speed *V*, and *ŵ* is the unit wind direction
+vector. Complex Gaussian noise (Box-Muller, thread-local `rand_r`) is
+multiplied by √P(k)/2 to populate the frequency-domain array, which is
+then transformed to spatial heights by a 2-D real inverse FFT
+(`fftw_plan_dft_c2r_2d`). The height field is normalised so that 3σ spans
+the target turbulence amplitude, which scales with pixel size.
+
+Foam is detected where wave crests exceed a threshold fraction of the total
+amplitude; a squared-excess kernel amplifies near-crest pixels (inspired by
+the 0AD `water_high.fs` lines 343–356 foam accumulation formula). Coastal
+foam is boosted using an exponential decay factor applied to a two-pass
+Euclidean distance transform from land pixels.
+
+### Maritime decorations (-d)
+
+Seven decoration types are scattered proportionally to ocean area:
+
+| Type | Pixels | Depth range | Density |
+|---|---|---|---|
+| Whale | 13 | 400–900 | 0.0008/km² |
+| Dolphin | 5 | 100–700 | 0.002/km² |
+| Fish school | 8 | 0–800 | 0.008/km² |
+| Octopus | 9 | 50–600 | 0.003/km² |
+| Treasure chest | 4 | 0–500 | 0.0001/km² |
+| Floating crate | 6 | 0–350 | 0.001/km² |
+| Sunken ship | 20 | 200–900 | 0.0003/km² |
+
+Each decoration modifies the depth-index of its pixels. Floating objects
+(dolphins, crates, treasure) use large negative deltas so they appear as
+bright surface features. Sunken ships use positive deltas on the hull and
+negative on the deck/mast for a shadow-and-highlight silhouette. Placement
+uses a fixed seed (reproducible). Decorations are most visible at fine
+resolutions (pixel size < 500 m).
+
 ### Multi-core parallelism
 
-All *r.mapcalc* and *r.neighbors* calls pass `nprocs=` equal to
-`os.cpu_count()` so every available logical CPU core is used. On a
-multi-core workstation this can reduce wall-clock time substantially for
-large rasters. The value is fixed once at module startup; to limit CPU
-usage, reduce the system-level CPU affinity before running the module.
+The module is written in C with OpenMP. All inner row loops — mask
+creation, depth normalisation, 3×3 integer smoothing, wave generation,
+Phillips-spectrum frequency fill, turbulence/foam, and shore distance —
+use `#pragma omp parallel for` with `omp_get_max_threads()` threads.
+To limit CPU usage set `OMP_NUM_THREADS` before running the module.
 
-*r.grow.distance* (used by the **-s** flag) does not support multi-threading
-and runs single-threaded regardless of the nprocs setting.
+The two-pass Euclidean distance transform used by the **-s** and **-f**
+flags is implemented directly in C (Meijster 2000 algorithm); no external
+module subprocess is needed.
 
 ### Progress reporting
 
@@ -230,6 +293,24 @@ i.ocean input=sea_mask output=ocean_waves -w -s
 d.rast map=ocean_waves
 ```
 
+### Phillips-spectrum turbulence with coastal foam
+
+```sh
+i.ocean input=sea_mask depth=gebco_bathy output=ocean_turbulent -f
+d.rast map=ocean_turbulent
+```
+
+### Full effect stack
+
+All effects combined: waves, turbulence/foam, latitude gradient, and
+maritime decorations.
+
+```sh
+i.ocean input=sea_mask depth=gebco_bathy output=ocean_full \
+        style=tropical -w -f -l -d
+d.rast map=ocean_full
+```
+
 ### Forcing a tropical palette with all effects enabled
 
 ```sh
@@ -258,7 +339,6 @@ d.shade shade=hillshade color=ocean_deep
 
 ## SEE ALSO
 
-*[r.mapcalc](https://grass.osgeo.org/grass-stable/manuals/r.mapcalc.html)*,
 *[r.neighbors](https://grass.osgeo.org/grass-stable/manuals/r.neighbors.html)*,
 *[r.colors](https://grass.osgeo.org/grass-stable/manuals/r.colors.html)*,
 *[r.grow.distance](https://grass.osgeo.org/grass-stable/manuals/r.grow.distance.html)*,

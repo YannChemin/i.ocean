@@ -2,6 +2,12 @@ MODULE_TOPDIR = ../..
 
 PGM = i.ocean
 
-include $(MODULE_TOPDIR)/include/Make/Script.make
+LIBES = $(RASTERLIB) $(GISLIB) $(MATHLIB) -lfftw3
+EXTRA_LIBS = $(OPENMP_LIBPATH) $(OPENMP_LIB)
+DEPENDENCIES = $(RASTERDEP) $(GISDEP)
+EXTRA_CFLAGS = $(OPENMP_CFLAGS)
+EXTRA_INC = $(OPENMP_INCPATH)
 
-default: script
+include $(MODULE_TOPDIR)/include/Make/Module.make
+
+default: cmd
