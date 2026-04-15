@@ -1,5 +1,7 @@
 # i.ocean
 
+![i.ocean example output](example.png)
+
 A [GRASS GIS](https://grass.osgeo.org/) addon that renders the ocean areas
 of a raster map with a realistic visual appearance.
 
