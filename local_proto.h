@@ -48,6 +48,34 @@ typedef struct {
     int nprocs;
 } OceanParams;
 
+/* ── decoration placement record ─────────────────────────────────────── */
+/*
+ * Populated by place_decorations(); consumed by create_deco_vector().
+ * Stores the map-coordinate centre and heading of each placed item.
+ */
+typedef struct {
+    int    type_idx;   /* index into DECORATIONS[] / VSHAPES[]    */
+    double east;       /* map-coordinate east of centre            */
+    double north;      /* map-coordinate north of centre           */
+    double angle_rad;  /* heading: 0 = facing north, π/2 = east   */
+} PlacedDeco;
+
+/* ── RAM check ────────────────────────────────────────────────────────── */
+typedef enum {
+    RAM_OK    = 0,   /* <= 60 % available                         */
+    RAM_WARN  = 1,   /* 60–80 %                                   */
+    RAM_TIGHT = 2,   /* 80–95 % — caller should disable -f        */
+    RAM_FATAL = 3    /* >= 95 % — G_fatal_error already called    */
+} RamStatus;
+
+/* Number of decoration types (must stay in sync with DECORATIONS[]) */
+#define N_DECO_TYPES 27
+
+/* Real-world sizes for each type (meters); defined in decorations.c */
+extern const double deco_real_length[N_DECO_TYPES];
+extern const double deco_real_width [N_DECO_TYPES];
+extern const char  *deco_type_name  [N_DECO_TYPES];
+
 /* ── temp-map registry ────────────────────────────────────────────────── */
 void   tmp_register(const char *name);
 void   tmp_cleanup(void);
@@ -57,6 +85,11 @@ Rbuf  *rbuf_alloc(int nrows, int ncols);
 void   rbuf_free(Rbuf *rb);
 Rbuf  *rbuf_read(const char *name);
 void   rbuf_write(const Rbuf *rb, const char *name, RASTER_MAP_TYPE type);
+
+/* ── ram_check.c ──────────────────────────────────────────────────────── */
+RamStatus ram_check(long nrows, long ncols,
+                    int has_w, int has_f, int has_s, int has_d,
+                    double *est_mb_out, double *avail_mb_out);
 
 /* ── ocean_mask.c ─────────────────────────────────────────────────────── */
 Rbuf  *make_mask_from_value(const Rbuf *input, double ocean_val,
@@ -114,21 +147,54 @@ Rbuf  *foam_turbulence(const Rbuf *depth_idx, const Rbuf *mask,
  * place_decorations() — scatter sea-life and maritime objects onto the
  * depth-index buffer.
  *
- * Each decoration type is defined by a small pixel-pattern (offset + delta),
- * a depth-index range in which it can appear, and a density (items per km²).
- * Positions are chosen from a seeded PRNG so results are reproducible.
+ * Real-world sizes (deco_real_length / deco_real_width) are defined
+ * in decorations.c.  Small objects (treasure chest, floating crate)
+ * are bumped up to the dolphin minimum (3 m) so all items share a
+ * homogeneous minimum ground size.
  *
- * Types:
- *   whale        — 13-pixel elongated body, bright surface sheen
- *   dolphin      — 5-pixel arc, very bright
- *   fish_school  — 8 scattered pixels, mottled bright
- *   octopus      — 9-pixel radial body+tentacles, alternating tones
- *   treasure     — 4-pixel bright "gold" cluster (depth_idx → 0)
- *   crate        — 6-pixel floating box (bright)
- *   ship         — 20-pixel sunken hull (dark keel, bright deck)
+ * Returns a G_malloc-ed array of PlacedDeco structs (*n_placed_out items).
+ * The caller is responsible for calling G_free() on the returned pointer.
+ * Returns NULL and sets *n_placed_out = 0 if no items were placed.
+ *
+ * deco_scale multiplies all vector silhouette dimensions but does NOT
+ * change the raster pixel-art stamp (which is resolution-dependent).
  */
-void  place_decorations(Rbuf *work, const Rbuf *mask,
-                        double pixel_m, double lo_clamp);
+PlacedDeco *place_decorations(Rbuf *work, const Rbuf *mask,
+                               const struct Cell_head *region,
+                               double pixel_m, double deco_scale,
+                               double lo_clamp,
+                               int *n_placed_out);
+
+/* ── vector_deco.c ────────────────────────────────────────────────────── */
+
+/*
+ * create_deco_vector() — create a GRASS vector map of maritime decoration
+ * silhouettes at real-world scale.
+ *
+ * Each PlacedDeco entry is drawn as a set of GV_LINE primitives using the
+ * 2-D silhouette shape for its type.  The shape coordinates (in metres)
+ * are:
+ *   • scaled by deco_scale
+ *   • rotated by angle_rad (clockwise from north)
+ *   • converted to map units (geographic or projected CRS)
+ *   • offset from the placement centre (east, north)
+ *
+ * The vector map carries one attribute table with columns:
+ *   cat INTEGER, type VARCHAR(32), len_m REAL, wid_m REAL, scale REAL
+ *
+ * Shape data is derived from 0AD structural mesh bounding boxes:
+ *   - Trireme hull (hele_ship_bireme.dae): 8.8 × 49.2 m → used for sunken ship
+ *   - fish_generic.dae: 8.9 × 6.1 m → scaled down for fish school
+ *   - Whale/dolphin: real cetacean biology (blue whale ~28 m, dolphin ~3 m)
+ *
+ * proj   : GRASS projection string (e.g. "ll" for geographic, "utm" for UTM)
+ * latitude: used for EW degree ↔ metre conversion in geographic CRS
+ */
+void create_deco_vector(const char *vmap_name,
+                        const PlacedDeco *places, int n_places,
+                        const struct Cell_head *region,
+                        const char *proj, const char *units,
+                        double latitude, double deco_scale);
 
 /* ── color_rules.c helpers in main.c ─────────────────────────────────── */
 const char *auto_style(double lat);

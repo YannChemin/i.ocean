@@ -249,6 +249,22 @@ Rbuf *foam_turbulence(const Rbuf *depth_idx, const Rbuf *mask,
     fftw_complex *freq    = fftw_alloc_complex((size_t)nrows * ncols_h);
     double       *spatial = fftw_alloc_real  ((size_t)nrows * ncols);
 
+    /*
+     * fftw_alloc_* returns NULL on OOM (unlike G_malloc which calls
+     * G_fatal_error).  Guard here to prevent the subsequent
+     * fftw_plan_dft_c2r_2d from dereferencing a NULL pointer (segfault).
+     */
+    if (!freq || !spatial) {
+        if (freq)    fftw_free(freq);
+        if (spatial) fftw_free(spatial);
+        G_fatal_error(
+            _("foam_turbulence: insufficient memory for FFTW3 arrays "
+              "(%lu bytes needed). Reduce the computational region or "
+              "omit the -f flag."),
+            (unsigned long)((size_t)nrows * ncols_h * sizeof(fftw_complex)
+                          + (size_t)nrows * ncols   * sizeof(double)));
+    }
+
     /* ── FFTW plan (must be created before filling the array) ────────── */
     fftw_plan plan = fftw_plan_dft_c2r_2d(nrows, ncols,
                                            freq, spatial,

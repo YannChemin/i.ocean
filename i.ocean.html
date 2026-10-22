@@ -1,0 +1,261 @@
+<h2>DESCRIPTION</h2>
+
+<em>i.ocean</em> renders ocean areas of a raster map with a realistic visual
+appearance. It combines depth-based colour gradients, latitude-driven colour
+temperature, optional wave textures, physically-based ocean turbulence with
+coastal foam, and optional maritime decorations to produce a styled,
+floating-point output raster with an automatically tuned ocean colour table.
+
+The module is written in C with OpenMP parallelism and uses FFTW3 for
+spectral ocean surface synthesis. At least one of <b>input</b> or <b>depth</b>
+must be provided. Non-ocean pixels are set to null in the output so the
+result composites cleanly over any land base map when displayed with
+<em>d.rast</em>.
+
+Processing progress is reported as a percentage through both the terminal
+and the GRASS GUI progress bar. All raster computations use all available
+CPU cores automatically.
+
+<p>
+The <b>input</b> parameter specifies an ocean mask raster. Cells whose value
+equals <b>ocean_value</b> (default: 1) are treated as ocean; all other cells
+become null in the output.
+</p>
+
+<p>
+The <b>depth</b> parameter specifies a bathymetric depth raster with positive
+values representing depth in metres below the surface (e.g. GEBCO). When
+<b>depth</b> is supplied it drives the colour gradient: shallow areas receive
+lighter, warmer colours and deep areas receive darker, cooler colours. When
+<b>input</b> is omitted, <b>depth</b> additionally defines the ocean extent by
+thresholding. When the depth map is stored as an integer raster (CELL type),
+it is automatically smoothed with a 3&times;3 neighbourhood average before
+normalisation to remove staircase artefacts from the rendered gradient.
+</p>
+
+<p>
+The <b>depth_min</b> option sets the minimum value in the <b>depth</b> map that is
+considered ocean. Use 0 (default) for standard bathymetric maps. For DEM
+or elevation maps where negative values represent water, set <b>depth_min</b>
+to a negative value such as -0.1.
+</p>
+
+<p>
+The <b>latitude</b> option sets the reference latitude in decimal degrees used
+to select the colour palette. When omitted the latitude is auto-detected
+from the centre of the current computational region.
+</p>
+
+<p>
+The <b>style</b> option overrides the auto-detected latitude zone and forces
+a specific colour palette: <em>auto</em>, <em>tropical</em>,
+<em>subtropical</em>, <em>temperate</em>, <em>subpolar</em>, or <em>polar</em>.
+</p>
+
+<p>
+The <b>-w</b> flag adds a sinusoidal wave texture. The wave period and
+amplitude are calibrated to the pixel size of the current computational
+region so that the result looks realistic at any scale.
+</p>
+
+<p>
+The <b>-s</b> flag estimates a depth proxy from the Euclidean distance of
+each ocean pixel to the nearest land pixel using an in-memory two-pass
+distance transform (Meijster 2000).
+</p>
+
+<p>
+The <b>-l</b> flag applies a subtle north&ndash;south warmth gradient across
+the scene, mimicking the visible sea-surface-temperature gradient.
+</p>
+
+<p>
+The <b>-f</b> flag generates a physically-based ocean surface using the
+Phillips power spectrum computed by FFTW3. Foam appears where wave crests
+exceed a threshold, amplified near the coast via an exponential shore-proximity
+factor derived from a two-pass Euclidean distance transform.
+</p>
+
+<p>
+The <b>-d</b> flag scatters maritime decorations across the ocean surface:
+whale, dolphin, fish school, octopus, treasure chest, floating crate, and
+sunken ship. Placement density is proportional to ocean area; a fixed-seed
+PRNG ensures reproducible results. A GRASS vector map is simultaneously
+created with the same name as the output raster, containing real-world-scale
+silhouette lines for each decoration. Use <b>deco_scale</b> to enlarge or
+shrink the vector silhouettes to match your map scale.
+</p>
+
+<p>
+The module performs a RAM feasibility check before allocating raster
+buffers. When estimated peak usage exceeds 80&nbsp;% of available memory
+the <b>-f</b> flag is automatically disabled with a warning. When it
+exceeds 95&nbsp;% a fatal error is raised with advice to reduce the
+computational region.
+</p>
+
+<h2>NOTES</h2>
+
+<h3>Ocean mask sources</h3>
+
+The ocean extent can come from two sources:
+<ol>
+<li><b>input</b> mask &mdash; an existing raster in which one cell value marks water,
+    specified with <b>ocean_value</b>.</li>
+<li><b>depth</b> map alone &mdash; ocean pixels are identified as cells in the
+    <b>depth</b> map whose value is at or above <b>depth_min</b>.</li>
+</ol>
+When both <b>input</b> and <b>depth</b> are provided, <b>input</b> defines the
+ocean extent and <b>depth</b> drives only the colour gradient.
+
+<h3>Depth index</h3>
+
+All depth information is normalised to a <em>depth index</em> ranging from 0
+(shoreline) to 1000 (abyssal plain). Three strategies apply in priority order:
+<ol>
+<li><b>depth</b> map &mdash; absolute depths rescaled to 0&ndash;1000.</li>
+<li><b>-s</b> flag &mdash; shore distance rescaled to 0&ndash;1000.</li>
+<li>Default &mdash; flat index of 500.</li>
+</ol>
+
+<h3>Integer depth smoothing</h3>
+
+When the <b>depth</b> map is integer (CELL type), a 3&times;3 neighbourhood
+average converts it to DCELL before normalisation, eliminating staircase
+terracing in the rendered gradient. FCELL and DCELL maps are passed through
+unchanged.
+
+<h3>Phillips-spectrum turbulence and foam (-f)</h3>
+
+The ocean surface height field is generated using the Phillips power spectrum:
+<pre>
+  P(k) = A &middot; exp(&minus;1/(k&middot;L)&sup2;) / k&sup4; &middot; |k&#770; &middot; w&#770;|&sup2;
+</pre>
+where <em>k</em> is the wavenumber, <em>L&nbsp;=&nbsp;V&sup2;/g</em> is the dominant length
+scale from wind speed <em>V</em>, and <em>w&#770;</em> is the unit wind direction.
+A 2-D real inverse FFT (<code>fftw_plan_dft_c2r_2d</code>) produces the spatial
+height field. Gaussian noise is generated per-thread with Box-Muller for
+thread safety. Coastal foam is amplified using an exponential decay factor
+applied to the shore distance field.
+
+<h3>Maritime decorations (-d)</h3>
+
+<p>
+Each decoration type is rendered both as a small pixel-art raster stamp and
+as a real-world-scale vector silhouette.  Vector shapes are derived from
+biological/historical data; small objects (treasure chest, floating crate)
+are bumped up to the dolphin minimum (3&nbsp;m) so that all types share a
+homogeneous minimum ground footprint on the map.  The 3D mesh reference for
+the sunken ship is the 0AD <code>hele_ship_bireme.dae</code> model
+(beam 8.8&nbsp;m, length 49.2&nbsp;m in-game), scaled to the canonical
+historical trireme dimensions.
+</p>
+
+<table border="1">
+<tr><th>Type</th><th>Pixels</th><th>Depth range</th><th>Density</th>
+    <th>Vector length</th><th>Vector width</th></tr>
+<tr><td>Whale (blue whale)</td><td>13</td><td>400&ndash;900</td><td>0.0008/km&sup2;</td>
+    <td>28&nbsp;m</td><td>7&nbsp;m</td></tr>
+<tr><td>Dolphin (bottlenose)</td><td>5</td><td>100&ndash;700</td><td>0.002/km&sup2;</td>
+    <td>3&nbsp;m</td><td>0.7&nbsp;m</td></tr>
+<tr><td>Fish school</td><td>8</td><td>0&ndash;800</td><td>0.008/km&sup2;</td>
+    <td>15&nbsp;m</td><td>15&nbsp;m</td></tr>
+<tr><td>Octopus</td><td>9</td><td>50&ndash;600</td><td>0.003/km&sup2;</td>
+    <td>3&nbsp;m</td><td>3&nbsp;m</td></tr>
+<tr><td>Treasure chest</td><td>4</td><td>0&ndash;500</td><td>0.0001/km&sup2;</td>
+    <td>3&nbsp;m *</td><td>2&nbsp;m *</td></tr>
+<tr><td>Floating crate</td><td>6</td><td>0&ndash;350</td><td>0.001/km&sup2;</td>
+    <td>3&nbsp;m *</td><td>3&nbsp;m *</td></tr>
+<tr><td>Sunken ship (trireme)</td><td>20</td><td>200&ndash;900</td><td>0.0003/km&sup2;</td>
+    <td>37&nbsp;m</td><td>7&nbsp;m</td></tr>
+</table>
+<p>* bumped from real size (~1&ndash;1.2&nbsp;m) to the dolphin minimum.</p>
+
+<h3>RAM check and partial-load mode</h3>
+
+<p>
+Before allocating raster buffers the module reads
+<code>/proc/meminfo</code> (Linux) to compare estimated peak usage
+against available RAM:
+</p>
+<ul>
+<li>&lt;&nbsp;60&nbsp;% available &mdash; proceed normally.</li>
+<li>60&ndash;80&nbsp;% &mdash; warning issued, processing continues.</li>
+<li>80&ndash;95&nbsp;% &mdash; warning issued; <b>-f</b> (FFTW3 foam) is
+    automatically disabled to reduce peak memory by ~3&times;.</li>
+<li>&ge;&nbsp;95&nbsp;% &mdash; fatal error; use <code>g.region</code>
+    to reduce the computational region.</li>
+</ul>
+<p>
+The main memory consumers are: mask and depth-index buffers
+(2 &times; <em>N</em> &times; 8&nbsp;bytes), FFTW3 complex and real
+arrays (~3 &times; <em>N</em> &times; 8&nbsp;bytes), and the shore
+distance float array (<em>N</em> &times; 4&nbsp;bytes), where
+<em>N</em> = rows &times; cols.
+</p>
+
+<h3>Multi-core parallelism</h3>
+
+All inner row loops use <code>#pragma omp parallel for</code> with
+<code>omp_get_max_threads()</code> threads. Set <code>OMP_NUM_THREADS</code>
+to limit CPU usage.
+
+<h3>Colour palettes</h3>
+
+<table border="1">
+<tr><th>Style</th><th>Latitude zone</th><th>Character</th></tr>
+<tr><td>tropical</td><td>&lt;&nbsp;23.5&deg;</td><td>Bright turquoise / cyan</td></tr>
+<tr><td>subtropical</td><td>23.5&nbsp;&ndash;&nbsp;35&deg;</td><td>Warm blue-green</td></tr>
+<tr><td>temperate</td><td>35&nbsp;&ndash;&nbsp;60&deg;</td><td>Clear cool blue</td></tr>
+<tr><td>subpolar</td><td>60&nbsp;&ndash;&nbsp;75&deg;</td><td>Steel blue</td></tr>
+<tr><td>polar</td><td>&gt;&nbsp;75&deg;</td><td>Icy pale blue</td></tr>
+</table>
+
+<h2>EXAMPLES</h2>
+
+<h3>Basic ocean rendering from a land/sea mask</h3>
+
+<div class="code"><pre>
+r.mapcalc "sea_mask = if(elevation &lt; 0, 1, null())"
+i.ocean input=sea_mask output=ocean_view
+d.rast map=ocean_view
+</pre></div>
+
+<h3>Using a bathymetric depth map</h3>
+
+Integer (CELL) depth maps are smoothed automatically.
+<div class="code"><pre>
+i.ocean depth=gebco_bathy output=ocean_view
+</pre></div>
+
+<h3>Combining mask and depth with all effects</h3>
+
+<div class="code"><pre>
+i.ocean input=sea_mask depth=gebco_bathy output=ocean_full \
+        style=tropical -w -f -l -d
+d.rast map=ocean_full
+</pre></div>
+
+<h3>Overlaying ocean on a land hillshade</h3>
+
+<div class="code"><pre>
+r.relief input=elevation output=hillshade
+i.ocean input=sea_mask depth=gebco_bathy output=ocean_deep -w -f -l
+d.shade shade=hillshade color=ocean_deep
+</pre></div>
+
+<h2>SEE ALSO</h2>
+
+<em><a href="r.neighbors.html">r.neighbors</a></em>,
+<em><a href="r.colors.html">r.colors</a></em>,
+<em><a href="r.relief.html">r.relief</a></em>,
+<em><a href="r.lake.html">r.lake</a></em>,
+<em><a href="d.rast.html">d.rast</a></em>,
+<em><a href="d.shade.html">d.shade</a></em>,
+<em><a href="d.vect.html">d.vect</a></em>,
+<em><a href="v.db.addtable.html">v.db.addtable</a></em>,
+<em><a href="m.proj.html">m.proj</a></em>
+
+<h2>AUTHORS</h2>
+
+i.ocean contributors, 2026.

@@ -128,9 +128,16 @@ static void apply_color_rules(const char *map, const PaletteStop *pal,
     char rules_path[GPATH_MAX];
     FILE *fp;
 
-    G_temp_element("i.ocean");
-    snprintf(rules_path, sizeof(rules_path), "%s/i.ocean_rules_%d.txt",
-             G_tempfile(), (int)getpid());
+    /* G_tempfile() returns a unique, G_malloc'd path in the GRASS temp dir.
+     * Use it directly as the rules file — do NOT treat it as a directory. */
+    {
+        char *tmp = G_tempfile();
+        if (!tmp)
+            G_fatal_error(_("G_tempfile() failed: cannot obtain temp path "
+                            "for colour rules"));
+        G_strlcpy(rules_path, tmp, sizeof(rules_path));
+        G_free(tmp);
+    }
 
     fp = fopen(rules_path, "w");
     if (!fp)
@@ -325,7 +332,7 @@ int main(int argc, char *argv[])
     /* options */
     struct Option *opt_input, *opt_output, *opt_depth,
                   *opt_ocean_val, *opt_depth_min,
-                  *opt_latitude, *opt_style;
+                  *opt_latitude, *opt_style, *opt_deco_scale;
     /* flags */
     struct Flag *flag_w, *flag_s, *flag_l, *flag_f, *flag_d;
 
@@ -447,8 +454,24 @@ int main(int argc, char *argv[])
     flag_d->description =
         _("Scatters sea wildlife (whales, dolphins, fish schools, octopus) "
           "and maritime objects (treasure chests, floating crates, "
-          "sunken ships) across the ocean surface");
+          "sunken ships) across the ocean surface as both raster stamps "
+          "and a GRASS vector silhouette map at real-world scale");
     flag_d->guisection  = "Effects";
+
+    opt_deco_scale = G_define_option();
+    opt_deco_scale->key         = "deco_scale";
+    opt_deco_scale->type        = TYPE_DOUBLE;
+    opt_deco_scale->label       = _("Vector decoration size multiplier");
+    opt_deco_scale->description =
+        _("Scale factor applied to the real-world silhouette dimensions "
+          "of all maritime decorations in the vector output map. "
+          "Use values > 1 to enlarge decorations that appear too small "
+          "at the current map scale, < 1 to reduce oversized features. "
+          "Default 1.0 uses biologically/historically accurate sizes "
+          "(blue whale 28 m, trireme 37 m, dolphin 3 m, etc.).");
+    opt_deco_scale->answer      = "1.0";
+    opt_deco_scale->required    = NO;
+    opt_deco_scale->guisection  = "Effects";
 
     /* mutual requirement: input or depth must be given */
     G_option_required(opt_input, opt_depth, NULL);
@@ -462,6 +485,11 @@ int main(int argc, char *argv[])
     const char *depth_name  = opt_depth->answer;
     double ocean_val  = atof(opt_ocean_val->answer);
     double depth_min  = atof(opt_depth_min->answer);
+    double deco_scale = atof(opt_deco_scale->answer);
+    if (deco_scale <= 0.0) {
+        G_warning(_("deco_scale must be > 0; reset to 1.0"));
+        deco_scale = 1.0;
+    }
 
     int nprocs = omp_get_max_threads();
 
@@ -473,7 +501,7 @@ int main(int argc, char *argv[])
         + (flag_l->answer ? 1 : 0)
         + (flag_w->answer ? 1 : 0)
         + (flag_f->answer ? 1 : 0)
-        + (flag_d->answer ? 1 : 0);
+        + (flag_d->answer ? 2 : 0);  /* +2: raster stamp + vector map */
     int step = 0;
 #define PROGRESS(msg) do { \
         G_percent(++step, total_steps, 1); \
@@ -516,6 +544,29 @@ int main(int argc, char *argv[])
     else
         latitude = center_latitude(&region, units_val, proj_val);
     G_verbose_message(_("Reference latitude: %.2f deg"), latitude);
+
+    /* ── RAM feasibility check (before any large allocation) ───────── */
+    {
+        double est_mb, avail_mb;
+        RamStatus rstat = ram_check(
+            region.rows, region.cols,
+            flag_w->answer, flag_f->answer,
+            flag_s->answer, flag_d->answer,
+            &est_mb, &avail_mb);
+
+        if (rstat == RAM_TIGHT && flag_f->answer) {
+            /* foam (-f) is the biggest single consumer; disable it */
+            flag_f->answer = '\0';   /* clear the flag answer */
+            G_warning(
+                _("Phillips-spectrum foam (-f) has been automatically "
+                  "disabled to stay within available RAM (%.0f MB "
+                  "estimated, %.0f MB available). "
+                  "Specify a smaller region or increase available RAM "
+                  "to use -f."),
+                est_mb, avail_mb);
+        }
+        /* RAM_FATAL already called G_fatal_error in ram_check() */
+    }
 
     const char *style = strcmp(opt_style->answer, "auto") == 0
                         ? auto_style(latitude)
@@ -601,9 +652,13 @@ int main(int argc, char *argv[])
     }
 
     /* ── maritime decorations ───────────────────────────────────────── */
+    PlacedDeco *placements  = NULL;
+    int         n_placements = 0;
     if (flag_d->answer) {
         PROGRESS("Placing maritime decorations...");
-        place_decorations(depth_idx, mask, pixel_m, lo_clamp);
+        placements = place_decorations(depth_idx, mask, &region,
+                                       pixel_m, deco_scale, lo_clamp,
+                                       &n_placements);
         /* decorations can push values lower; keep clamp tight */
         if (lo_clamp > -600.0)
             lo_clamp = -600.0;
@@ -622,6 +677,23 @@ int main(int argc, char *argv[])
         }
     }
     rbuf_write(depth_idx, output_name, DCELL_TYPE);
+
+    /* ── vector decoration map ──────────────────────────────────────── */
+    if (flag_d->answer && placements && n_placements > 0) {
+        PROGRESS("Creating vector decoration map...");
+        create_deco_vector(output_name,
+                           placements, n_placements,
+                           &region,
+                           proj_val, units_val,
+                           latitude, deco_scale);
+        G_free(placements);
+        placements = NULL;
+        G_message(_("Vector decorations: display with  d.vect map=%s"),
+                  output_name);
+    } else if (placements) {
+        G_free(placements);
+        placements = NULL;
+    }
 
     /* ── colour rules ───────────────────────────────────────────────── */
     PROGRESS("Applying ocean colour palette...");
