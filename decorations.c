@@ -166,12 +166,12 @@ const double deco_real_width[N_DECO_TYPES] = {
     24.0,   /* shark:          ±12 m pectoral fin span                  */
     12.0,   /* barrel_cluster: x=-6 to x=+6                            */
     /* merchant vessels — beam (max x-extent × 2) */
-    60.0,   /* crude_tanker:   ±30 m hull beam                         */
-    70.0,   /* lng_carrier:    ±35 m hull beam                         */
-    64.0,   /* bulk_carrier:   ±32 m hull beam                         */
-    44.0,   /* product_tanker: ±22 m hull beam                         */
-    60.0,   /* container_ship: ±30 m hull beam                         */
-    32.0,   /* cargo_ship:     ±16 m hull beam                         */
+    44.0,   /* crude_tanker:   Aframax beam                             */
+    49.0,   /* lng_carrier:    Moss-type beam                           */
+    50.0,   /* bulk_carrier:   Capesize beam                            */
+    32.0,   /* product_tanker: MR beam                                  */
+    48.0,   /* container_ship: Neo-Panamax beam                         */
+    22.0,   /* cargo_ship:     general cargo beam                       */
 };
 
 /* ── pixel offset entry ──────────────────────────────────────────────── */
